@@ -180,7 +180,7 @@ class PhenotypeExperiment:
 # ===================================================================
 
 if __name__ == "__main__":
-    # Create an instance of the experiment
+    # Create an instance of the experiment with 1000 agents for better results
     experiment = PhenotypeExperiment(n_agents=1000, n_trials=150)
     
     # --- Generate Dataset 1: The "Observable" Dataset ---
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     # Save the dataset
     output_dir = "datasets"
     os.makedirs(output_dir, exist_ok=True)
-    observable_df.to_csv(os.path.join(output_dir, "observable_bandit_data.csv"), index=False)
+    observable_df.to_csv(os.path.join(output_dir, f"observable_bandit_data_{experiment.n_agents}agents.csv"), index=False)
     
     print(f"Saved 'Observable Only' dataset with shape {observable_df.shape}")
     print("Head of the dataset:")
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     ground_truth_df = experiment.run_experiment(include_internal_states=True)
     
     # Save the dataset
-    ground_truth_df.to_csv(os.path.join(output_dir, "ground_truth_bandit_data.csv"), index=False)
+    ground_truth_df.to_csv(os.path.join(output_dir, f"ground_truth_bandit_data_{experiment.n_agents}agents.csv"), index=False)
 
     print(f"Saved 'Ground Truth' dataset with shape {ground_truth_df.shape}")
     print("Head of the dataset:")
