@@ -97,10 +97,12 @@ class PhenotypeExperiment:
         return pd.DataFrame(all_trials_data)
 
 if __name__ == "__main__":
-    train_experiment = PhenotypeExperiment(n_agents=1000, n_trials=150)
+    train_experiment = PhenotypeExperiment(n_agents=1000, n_trials=150, random_seed=456)
+    np.random.seed(456)
     train_df = train_experiment.run_experiment(include_internal_states=False)
     
-    test_experiment = PhenotypeExperiment(n_agents=1000, n_trials=150)
+    test_experiment = PhenotypeExperiment(n_agents=1000, n_trials=150, random_seed=434)
+    np.random.seed(434)
     test_df = test_experiment.run_experiment(include_internal_states=False)
     
     output_dir = "datasets"

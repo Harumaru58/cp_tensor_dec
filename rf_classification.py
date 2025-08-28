@@ -23,7 +23,7 @@ def load_train_test_datasets():
     train_data = pd.read_csv(train_path)
     test_data = pd.read_csv(test_path)
     # get only the first 500 rows of the test data
-    test_data = test_data.head(500)
+    #test_data = test_data.head(500)
     
     return train_data, test_data
 
