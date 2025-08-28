@@ -1,263 +1,301 @@
+import os
+import sys
 import numpy as np
 import pandas as pd
-import os
+import tensorly as tl
+from tensorly.decomposition import non_negative_parafac
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
 import seaborn as sns
-import joblib
 
-# ===================================================================
-# HELPER FUNCTION TO ENSURE REQUIRED FILES EXIST
-# ===================================================================
+def load_train_test_datasets():
+    """Load the separate train and test datasets"""
+    train_path = 'datasets/raw_dataset_train_1000.csv'
+    test_path = 'datasets/raw_dataset_test_1000.csv'
+    
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(f"Train dataset not found at {train_path}")
+    if not os.path.exists(test_path):
+        raise FileNotFoundError(f"Test dataset not found at {test_path}")
+    
+    train_data = pd.read_csv(train_path)
+    test_data = pd.read_csv(test_path)
+    # get only the first 500 rows of the test data
+    test_data = test_data.head(500)
+    
+    return train_data, test_data
 
-def ensure_required_files_exist():
-    """Checks if all required files exist for classification."""
-    required_files = [
-        'best_random_forest.joblib',
-        'agent_factors_train.npy',
-        'trial_factors.npy',
-        'feature_factors.npy',
-        'weights.npy',
-        'train_labels.npy',
-        'test_labels.npy'
-    ]
+def create_tensor_from_data(data, n_agents, n_trials, n_features=2):
+    """Create a 3D tensor from the dataset"""
+    # Reshape data into tensor: (agents, trials, features)
+    # Features: action (0/1) and reward (0/1)
+    tensor = np.zeros((n_agents, n_trials, n_features))
     
-    missing_files = [f for f in required_files if not os.path.exists(f)]
+    for agent_id in range(n_agents):
+        agent_data = data[data['agent_id'] == agent_id]
+        if len(agent_data) == n_trials:
+            tensor[agent_id, :, 0] = agent_data['action'].values  # actions
+            tensor[agent_id, :, 1] = agent_data['reward'].values  # rewards
     
-    if missing_files:
-        print("="*80)
-        print("ERROR: Missing required files for classification:")
-        for f in missing_files:
-            print(f"  - {f}")
-        print("\nPlease run the following scripts in order:")
-        print("1. 'tensor_dec.py' - for tensor decomposition")
-        print("2. 'rf_param_eval.py' - for parameter estimation")
-        print("3. 'rf_classification.py' - for classification (this script)")
-        print("="*80)
-        exit()
+    return tensor
 
-# ===================================================================
-# CLASSIFICATION FUNCTIONS
-# ===================================================================
-
-def load_classification_data():
-    """Load all data needed for classification."""
-    print("Loading classification data...")
-    
-    # Load the best trained model
-    best_rf = joblib.load('best_random_forest.joblib')
-    
-    # Load tensor decomposition factors
-    agent_factors_train = np.load('agent_factors_train.npy')
-    trial_factors = np.load('trial_factors.npy')
-    feature_factors = np.load('feature_factors.npy')
-    weights = np.load('weights.npy')
-    train_labels = np.load('train_labels.npy')
-    test_labels = np.load('test_labels.npy')
-    
-    print(f"  -> Best model loaded: {type(best_rf).__name__}")
-    print(f"  -> Training features: {agent_factors_train.shape}")
-    print(f"  -> Training labels: {train_labels.shape}")
-    print(f"  -> Test labels: {test_labels.shape}")
-    
-    return best_rf, agent_factors_train, trial_factors, feature_factors, weights, train_labels, test_labels
-
-def project_test_data_advanced(trial_factors, feature_factors, weights, test_tensor):
-    """Advanced projection of test data onto learned factors."""
-    print("Performing advanced test data projection...")
-    
-    # More sophisticated projection using the learned factors
-    # This creates a projection matrix that maps test data to the learned latent space
-    
-    n_test_agents = test_tensor.shape[0]
-    n_factors = trial_factors.shape[1]
-    
-    projected_factors = np.zeros((n_test_agents, n_factors))
-    
-    for i in range(n_test_agents):  # For each test agent
-        agent_tensor = test_tensor[i]  # Shape: (n_trials, n_features)
+def perform_cp_decomposition(tensor, rank=3, n_iter_max=5000, random_state=42):
+    """Perform non-negative CP decomposition with error handling"""
+    try:
+        decomp = non_negative_parafac(
+            tensor,
+            init="random",
+            rank=rank,
+            n_iter_max=n_iter_max,
+            tol=1e-8, 
+            random_state=random_state,
+            normalize_factors=False
+        )
         
-        for j in range(n_factors):  # For each latent factor
-            # Project using the learned trial and feature patterns
-            trial_pattern = trial_factors[:, j:j+1]  # Shape: (n_trials, 1)
-            feature_pattern = feature_factors[:, j:j+1]  # Shape: (n_features, 1)
-            
-            # Compute projection: sum over trials and features
-            projection = np.sum(agent_tensor * trial_pattern * feature_pattern.T)
-            projected_factors[i, j] = projection
-    
-    print(f"  -> Projected test factors shape: {projected_factors.shape}")
-    return projected_factors
+        print(f"CP decomposition completed for rank {rank}!")
+        return decomp
+    except Exception as e:
+        print(f"CP decomposition failed for rank {rank}: {e}")
+        raise
 
-def evaluate_model_performance(model, X_train, y_train, X_test, y_test):
-    """Evaluate the model performance on both training and test sets."""
-    print("\n--- Model Performance Evaluation ---")
+def manual_l1_normalize(cp_decomposition, min_norm=1e-12):
+    """Normalize CP factors using L1 norm and adjust lambda weights accordingly"""
+    weights = cp_decomposition[0].copy()
+    factors = [f.copy() for f in cp_decomposition[1]]
     
-    # Training set performance
-    y_train_pred = model.predict(X_train)
-    train_accuracy = accuracy_score(y_train, y_train_pred)
+    for idx, factor in enumerate(factors):
+        l1_norms = np.sum(np.abs(factor), axis=0)
+        l1_norms[l1_norms < min_norm] = 1.0
+        factors[idx] = factor / l1_norms[np.newaxis, :]
+        weights *= l1_norms
     
-    # Test set performance
-    y_test_pred = model.predict(X_test)
-    test_accuracy = accuracy_score(y_test, y_test_pred)
-    
-    print(f"Training Accuracy: {train_accuracy:.4f}")
-    print(f"Test Accuracy: {test_accuracy:.4f}")
-    
-    # Detailed classification report
-    print("\n--- Training Set Classification Report ---")
-    print(classification_report(y_train, y_train_pred))
-    
-    print("\n--- Test Set Classification Report ---")
-    print(classification_report(y_test, y_test_pred))
-    
-    return y_train_pred, y_test_pred, train_accuracy, test_accuracy
+    return (weights, factors)
 
-def create_confusion_matrices(y_train, y_train_pred, y_test, y_test_pred, save_plots=True):
-    """Create and display confusion matrices."""
-    print("\n--- Creating Confusion Matrices ---")
-    
-    # Get unique labels for consistent ordering
-    all_labels = sorted(list(set(y_train) | set(y_test)))
-    
-    # Training set confusion matrix
-    cm_train = confusion_matrix(y_train, y_train_pred, labels=all_labels)
-    
-    # Test set confusion matrix
-    cm_test = confusion_matrix(y_test, y_test_pred, labels=all_labels)
-    
-    # Create plots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
-    # Training confusion matrix
-    sns.heatmap(cm_train, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=all_labels, yticklabels=all_labels, ax=ax1)
-    ax1.set_title('Training Set Confusion Matrix')
-    ax1.set_xlabel('Predicted')
-    ax1.set_ylabel('Actual')
-    
-    # Test confusion matrix
-    sns.heatmap(cm_test, annot=True, fmt='d', cmap='Blues',
-                xticklabels=all_labels, yticklabels=all_labels, ax=ax2)
-    ax2.set_title('Test Set Confusion Matrix')
-    ax2.set_xlabel('Predicted')
-    ax2.set_ylabel('Actual')
-    
-    plt.tight_layout()
-    
-    if save_plots:
-        plt.savefig('confusion_matrices.png', dpi=300, bbox_inches='tight')
-        print("  -> Confusion matrices saved as 'confusion_matrices.png'")
-    
-    plt.show()
-    
-    return cm_train, cm_test
+def reorder_components_by_weights(weights, factors):
+    """Reorder components by decreasing weight magnitude"""
+    sorted_indices = np.argsort(weights)[::-1]
+    sorted_weights = weights[sorted_indices]
+    sorted_factors = [factor[:, sorted_indices] for factor in factors]
+    return sorted_weights, sorted_factors
 
-def analyze_feature_importance(model, feature_names):
-    """Analyze and visualize feature importance."""
-    print("\n--- Feature Importance Analysis ---")
-    
-    # Get feature importance
-    importance = model.feature_importances_
-    
-    # Create importance DataFrame
-    importance_df = pd.DataFrame({
-        'Feature': feature_names,
-        'Importance': importance
-    }).sort_values('Importance', ascending=False)
-    
-    print("Feature Importance Ranking:")
-    print(importance_df)
-    
-    # Create visualization
-    plt.figure(figsize=(10, 6))
-    sns.barplot(data=importance_df, x='Importance', y='Feature')
-    plt.title('Random Forest Feature Importance')
-    plt.xlabel('Importance')
-    plt.tight_layout()
-    
-    # Save plot
-    plt.savefig('feature_importance_plot.png', dpi=300, bbox_inches='tight')
-    print("  -> Feature importance plot saved as 'feature_importance_plot.png'")
-    
-    plt.show()
-    
-    return importance_df
+def extract_agent_factors(factors, agent_dim=0):
+    """Extract agent factor matrix from CP decomposition"""
+    return factors[agent_dim]
 
-def save_classification_results(y_train_pred, y_test_pred, train_accuracy, test_accuracy, 
-                              importance_df, cm_train, cm_test):
-    """Save all classification results to files."""
-    print("\n--- Saving Classification Results ---")
-    
-    # Save predictions
-    np.save('y_train_pred.npy', y_train_pred)
-    np.save('y_test_pred.npy', y_test_pred)
-    
-    # Save accuracy scores
-    results = {
-        'train_accuracy': train_accuracy,
-        'test_accuracy': test_accuracy,
-        'overfitting': train_accuracy - test_accuracy
-    }
-    
-    with open('classification_results.txt', 'w') as f:
-        f.write("Random Forest Classification Results\n")
-        f.write("="*40 + "\n")
-        f.write(f"Training Accuracy: {train_accuracy:.4f}\n")
-        f.write(f"Test Accuracy: {test_accuracy:.4f}\n")
-        f.write(f"Overfitting (Train - Test): {results['overfitting']:.4f}\n")
-    
-    # Save confusion matrices
-    np.save('confusion_matrix_train.npy', cm_train)
-    np.save('confusion_matrix_test.npy', cm_test)
-    
-    # Save feature importance
-    importance_df.to_csv('final_feature_importance.csv', index=False)
-    
-    print("  -> All results saved to files")
-    print("  -> Classification results saved as 'classification_results.txt'")
+# def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42):
+def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42, weights_explicit=None):
 
-# ===================================================================
-# MAIN EXECUTION BLOCK
-# ===================================================================
+    """Prepare agent features using CP decomposition"""
+    print(f"Preparing features for dataset with shape: {data.shape}")
+    
+    # Get unique agents and trials
+    n_agents = data['agent_id'].nunique()
+    n_trials = data.groupby('agent_id').size().iloc[0]
+    
+    print(f"Creating tensor with shape: ({n_agents}, {n_trials}, 2)")
+    
+    # Create tensor from data
+    tensor = create_tensor_from_data(data, n_agents, n_trials, n_features=2)
+    
+    # Perform CP decomposition
+    print(f"Performing CP decomposition with rank {rank}...")
+    cp_decomp = perform_cp_decomposition(tensor, rank, n_iter_max, random_state)
+    
+    # L1 normalize factors
+    print("L1 normalizing factors...")
+    weights, factors = manual_l1_normalize(cp_decomp)
+    #print(f"Weights: {weights}")
+    #print(f"weights shape: {weights.shape}")
 
-if __name__ == "__main__":
-    print("--- Random Forest Classification Pipeline ---")
+    #if weights_explicit is not None:
+    #    weights = weights_explicit
+
+    # Reorder components by weights
+    print("Reordering components by weights...")
+    sorted_weights, sorted_factors = reorder_components_by_weights(weights, factors)
     
-    # Check if required files exist
-    ensure_required_files_exist()
+    # Extract agent factors (first dimension)
+    print("Extracting agent factors...")
+    agent_factors = extract_agent_factors(sorted_factors, agent_dim=0)
+    #agent_factors = extract_agent_factors(factors, agent_dim=0)
+
     
-    # Load data
-    best_rf, agent_factors_train, trial_factors, feature_factors, weights, train_labels, test_labels = load_classification_data()
+    # Get phenotypes for each agent
+    phenotypes = []
+    for agent_id in range(n_agents):
+        agent_phenotype = data[data['agent_id'] == agent_id]['phenotype'].iloc[0]
+        phenotypes.append(agent_phenotype)
     
-    # For now, we'll use the training data as a placeholder for test features
-    # In a real scenario, you'd need to load the actual test tensor and project it
-    print("\nNote: Using training data as placeholder for test features.")
-    print("In practice, you'd load the test tensor and project it onto learned factors.")
+    print(f"Feature matrix shape: {agent_factors.shape}")
+    print(f"Number of phenotypes: {len(set(phenotypes))}")
     
-    # Use training data for both train and test (placeholder)
-    X_train = agent_factors_train
-    X_test = agent_factors_train  # Placeholder - should be projected test data
-    y_train = train_labels
-    y_test = test_labels
+    return agent_factors, np.array(phenotypes)
+
+def train_random_forest(X_train, y_train, random_state=42):
+    """Train Random Forest classifier"""
+    le = LabelEncoder()
+    y_train_encoded = le.fit_transform(y_train)
     
-    # Evaluate model performance
-    y_train_pred, y_test_pred, train_accuracy, test_accuracy = evaluate_model_performance(
-        best_rf, X_train, y_train, X_test, y_test
+    rf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=10,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        random_state=random_state,
+        n_jobs=-1
     )
     
-    # Create confusion matrices
-    cm_train, cm_test = create_confusion_matrices(y_train, y_train_pred, y_test, y_test_pred)
+    rf.fit(X_train, y_train_encoded)
     
-    # Analyze feature importance
-    feature_names = [f'LatentFactor_{i+1}' for i in range(X_train.shape[1])]
-    importance_df = analyze_feature_importance(best_rf, feature_names)
+    return rf, le
+
+def evaluate_model(rf, le, X_test, y_test_encoded):
+    """Evaluate the trained model"""
     
-    # Save all results
-    save_classification_results(y_train_pred, y_test_pred, train_accuracy, test_accuracy,
-                              importance_df, cm_train, cm_test)
+    # Make predictions
+    y_pred = rf.predict(X_test)
+    y_pred_proba = rf.predict_proba(X_test)
     
-    print("\n--- Classification Complete ---")
-    print("All results have been saved and visualized.")
-    print("Check the generated files and plots for detailed analysis.")
+    # Calculate metrics
+    accuracy = accuracy_score(y_test_encoded, y_pred)
+    
+    print(f"Test Accuracy: {accuracy:.4f}")
+    print(f"\nClassification Report:")
+    print(classification_report(y_test_encoded, y_pred, target_names=le.classes_))
+    
+    # Confusion matrix
+    cm = confusion_matrix(y_test_encoded, y_pred)
+    print(f"\nConfusion Matrix:")
+    print(cm)
+    
+    return accuracy, y_pred, y_pred_proba
+
+def plot_confusion_matrix(y_test, y_pred, le, accuracy):
+    """Plot confusion matrix heatmap and save to file"""
+    
+    # Create figure with single plot
+    fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+    
+    # Confusion Matrix Heatmap
+    cm = confusion_matrix(y_test, y_pred)
+    
+    # Define the desired phenotype order
+    desired_order = ['fast_learner', 'slow_learner', 'explorer', 'exploiter', 'random']
+    
+    # Reorder confusion matrix to match desired order
+    # Get the current order from the label encoder
+    current_order = list(le.classes_)
+    
+    # Create mapping from current order to desired order
+    order_mapping = []
+    for desired_phenotype in desired_order:
+        if desired_phenotype in current_order:
+            order_mapping.append(current_order.index(desired_phenotype))
+    
+    # Reorder the confusion matrix
+    cm_reordered = cm[order_mapping][:, order_mapping]
+    
+    # Get the reordered phenotype labels
+    reordered_labels = [desired_order[i] for i in range(len(order_mapping))]
+    
+    # Create heatmap with counts clearly displayed
+    im = ax.imshow(cm_reordered, cmap='Blues', aspect='auto')
+    
+    # Add count annotations to each cell
+    for i in range(len(reordered_labels)):
+        for j in range(len(reordered_labels)):
+            text = ax.text(j, i, str(cm_reordered[i, j]),
+                          ha="center", va="center", 
+                          color="black", fontsize=12)
+    
+    # Set ticks and labels
+    ax.set_xticks(range(len(reordered_labels)))
+    ax.set_yticks(range(len(reordered_labels)))
+    ax.set_xticklabels(reordered_labels, rotation=45, ha='right')
+    ax.set_yticklabels(reordered_labels, rotation=0)
+    
+    # Set title and labels
+    ax.set_title(f'Confusion Matrix - Accuracy: {accuracy:.4f}', fontsize=16, fontweight='bold', pad=20)
+    ax.set_xlabel('Predicted Phenotype', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Actual Phenotype', fontsize=14, fontweight='bold')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Count', fontsize=12, fontweight='bold')
+    
+    # Adjust layout and save
+    plt.tight_layout()
+    
+    # Create output directory if it doesn't exist
+    output_dir = 'classification_results'
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save the plot
+    output_path = os.path.join(output_dir, 'confusion_matrix.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Confusion matrix plot saved to: {output_path}")
+    
+    # Show the plot
+    plt.show()
+
+def main():
+    """Main function"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Raw dataset classification")
+    parser.add_argument("--rank", type=int, default=3, help="CP decomposition rank (default: 3)")
+    parser.add_argument("--rf-seed", type=int, default=42, help="Random Forest seed (default: 42)")
+    
+    args = parser.parse_args()
+    
+    print("=" * 60)
+    print("RAW DATASET CLASSIFICATION WITH CP DECOMPOSITION")
+    print("=" * 60)
+    
+    try:
+        # Load separate train and test datasets
+        print("Loading datasets...")
+        train_data, test_data = load_train_test_datasets()
+        
+        # Prepare features for both datasets using CP decomposition
+        print(f"\nPreparing training features with rank {args.rank}...")
+        X_train, y_train = prepare_agent_features(train_data, rank=args.rank, random_state=args.rf_seed)
+        
+        print(f"\nPreparing test features with rank {args.rank}...")
+        #weights = np.array([49688.17821651, 41862.07007872, 35370.41078917])
+        #weights = np.array([1,1,1])
+        #X_test, y_test = prepare_agent_features(test_data, rank=args.rank, random_state=args.rf_seed, weights_explicit=weights)
+        X_test, y_test = prepare_agent_features(test_data, rank=args.rank, random_state=args.rf_seed)
+        # Train model
+        print("\nTraining Random Forest classifier...")
+        rf, le = train_random_forest(X_train, y_train, random_state=args.rf_seed)
+        
+        # Ensure test labels are encoded with the same encoder
+        #print(f"Test labels: {y_test}")
+        y_test_encoded = le.transform(y_test)
+        #print(f"Test labels encoded: {le.transform(y_test)}")
+        
+        # Evaluate model
+        print("\nEvaluating model...")
+        accuracy, y_pred, y_pred_proba = evaluate_model(rf, le, X_test, y_test_encoded)
+        
+        # Plot results
+        print("\nGenerating confusion matrix plot...")
+        plot_confusion_matrix(y_test_encoded, y_pred, le, accuracy)
+        
+        print("\n" + "=" * 60)
+        print("CLASSIFICATION COMPLETED SUCCESSFULLY!")
+        print("=" * 60)
+        
+        return accuracy
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+if __name__ == "__main__":
+    main()
