@@ -122,6 +122,41 @@ def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42):
     
     return agent_factors, np.array(phenotypes), sorted_weights, sorted_factors
 
+def prepare_agent_features_pca(data, n_components=3, random_state=42):
+    """Prepare agent features using PCA instead of CP decomposition"""
+    print(f"Preparing features using PCA for dataset with shape: {data.shape}")
+    
+    # Get unique agents and trials
+    n_agents = data['agent_id'].nunique()
+    n_trials = data.groupby('agent_id').size().iloc[0]
+    
+    print(f"Creating tensor with shape: ({n_agents}, {n_trials}, 2)")
+    
+    # Create tensor from data
+    tensor = create_tensor_from_data(data, n_agents, n_trials, n_features=2)
+    
+    # Reshape tensor to 2D for PCA: (n_agents, n_trials * n_features)
+    tensor_2d = tensor.reshape(n_agents, -1)
+    print(f"Reshaped tensor shape: {tensor_2d.shape}")
+    
+    # Apply PCA
+    from sklearn.decomposition import PCA
+    pca = PCA(n_components=n_components, random_state=random_state)
+    features = pca.fit_transform(tensor_2d)
+    
+    # Get phenotypes for each agent
+    phenotypes = []
+    for agent_id in range(n_agents):
+        agent_phenotype = data[data['agent_id'] == agent_id]['phenotype'].iloc[0]
+        phenotypes.append(agent_phenotype)
+    
+    print(f"PCA features shape: {features.shape}")
+    print(f"Explained variance ratio: {pca.explained_variance_ratio_}")
+    print(f"Cumulative explained variance: {np.cumsum(pca.explained_variance_ratio_)}")
+    print(f"Number of phenotypes: {len(set(phenotypes))}")
+    
+    return features, np.array(phenotypes), pca
+
 def project_test_data_onto_train_space(test_tensor, B_train, C_train, weights_train):
     """Project test data onto the latent space defined by B_train and C_train"""
     print("Projecting test data onto training latent space...")
@@ -152,9 +187,12 @@ def project_test_data_onto_train_space(test_tensor, B_train, C_train, weights_tr
         A_test[i, :] = a_i
     
     # 4. Scale by the training weights to maintain consistency
-    A_test_scaled = A_test * weights_train
+    # But first, normalize the weights to prevent extreme scaling
+    weights_normalized = weights_train / np.max(np.abs(weights_train))
+    A_test_scaled = A_test * weights_normalized
     
     print(f"Projection completed. A_test shape: {A_test_scaled.shape}")
+    print(f"Weights used for scaling: {weights_normalized}")
     return A_test_scaled
 
 def train_random_forest(X_train, y_train, random_state=42):
@@ -263,21 +301,15 @@ def main():
         print("Loading datasets...")
         train_data, test_data = load_train_test_datasets()
         
-        # Prepare training features and extract factors
-        print(f"\n1. Preparing training features with rank {args.rank}...")
-        X_train, y_train, weights_train, factors_train = prepare_agent_features(
-            train_data, rank=args.rank, random_state=args.rf_seed
+        # Prepare training features using PCA
+        print(f"\n1. Preparing training features with {args.rank} components...")
+        X_train, y_train, pca_train = prepare_agent_features_pca(
+            train_data, n_components=args.rank, random_state=args.rf_seed
         )
         
-        # Extract B_train and C_train from training factors
-        B_train = factors_train[1]  # Trial factors (n_trials, rank)
-        C_train = factors_train[2]  # Feature factors (n_features, rank)
-        
-        print(f"Training factors extracted:")
-        print(f"  A_train shape: {X_train.shape}")
-        print(f"  B_train shape: {B_train.shape}")
-        print(f"  C_train shape: {C_train.shape}")
-        print(f"  Weights: {weights_train}")
+        print(f"Training features extracted:")
+        print(f"  X_train shape: {X_train.shape}")
+        print(f"  PCA components: {args.rank}")
         
         # Create test tensor
         print(f"\n2. Creating test tensor...")
@@ -286,9 +318,10 @@ def main():
         test_tensor = create_tensor_from_data(test_data, n_agents_test, n_trials, n_features=2)
         print(f"Test tensor shape: {test_tensor.shape}")
         
-        # Project test data onto training latent space
-        print(f"\n3. Projecting test data onto training latent space...")
-        X_test = project_test_data_onto_train_space(test_tensor, B_train, C_train, weights_train)
+        # Project test data using PCA transform
+        print(f"\n3. Projecting test data using PCA...")
+        test_tensor_2d = test_tensor.reshape(n_agents_test, -1)
+        X_test = pca_train.transform(test_tensor_2d)
         
         # Get test phenotypes
         test_phenotypes = []
