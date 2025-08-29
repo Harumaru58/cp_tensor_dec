@@ -26,7 +26,7 @@ def load_train_test_datasets():
 
 
 
-def prepare_sliding_window_data(data, window_size=30):
+def prepare_sliding_window_data(data, window_size=100):
     """
     Prepare data using sliding window approach to avoid future information leakage.
     Only uses early trials (0 to window_size-1) to predict phenotype.

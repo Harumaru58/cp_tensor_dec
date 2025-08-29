@@ -17,6 +17,15 @@ class QLearningAgent:
         self.temperature = temperature
         self.n_actions = n_actions
         self.Q = np.zeros(n_actions)
+        
+        # Add tracking for additional observable features
+       # self.consecutive_actions = 0
+       # self.total_rewards = 0
+       # self.action_counts = np.zeros(n_actions)
+       # self.win_streak = 0
+       # self.trial_index = 0    
+
+
 
     def choose_action(self):
         if self.temperature == 0:
