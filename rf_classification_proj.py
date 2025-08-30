@@ -1,45 +1,50 @@
-import os
-import sys
 import numpy as np
 import pandas as pd
-import tensorly as tl
-from tensorly.decomposition import non_negative_parafac
+import os
+import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import LabelEncoder
-import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.optimize import nnls
+import argparse
+from tensorly.decomposition import non_negative_parafac
 
 def load_train_test_datasets():
     """Load the separate train and test datasets"""
-    train_path = 'datasets/raw_dataset_train_1000.csv'
-    test_path = 'datasets/raw_dataset_test_1000.csv'
+    train_path = 'datasets/enhanced_dataset_train_1000_seed_789.csv'
+    test_path = 'datasets/enhanced_dataset_test_1000_seed_987.csv'
     
     if not os.path.exists(train_path):
-        raise FileNotFoundError(f"Train dataset not found at {train_path}")
+        raise FileNotFoundError(f"Enhanced train dataset not found at {train_path}")
     if not os.path.exists(test_path):
-        raise FileNotFoundError(f"Test dataset not found at {test_path}")
+        raise FileNotFoundError(f"Enhanced test dataset not found at {test_path}")
     
     train_data = pd.read_csv(train_path)
     test_data = pd.read_csv(test_path)
-
     
     return train_data, test_data
 
-def create_tensor_from_data(data, n_agents, n_trials, n_features=2):
-    """Create a 3D tensor from the dataset"""
-    tensor = np.zeros((n_agents, n_trials, n_features))
-    
-    for agent_id in range(n_agents):
-        agent_data = data[data['agent_id'] == agent_id]
-        if len(agent_data) == n_trials:
-            tensor[agent_id, :, 0] = agent_data['action'].values  # actions
-            tensor[agent_id, :, 1] = agent_data['reward'].values  # rewards
-    
-    return tensor
+def create_tensor_from_data(data, n_features=2):
+    """
+    Create 3D tensor (n_agents, n_trials, n_features) and return agent_id order.
+    Ensures correct ordering and raises if trial counts mismatch.
+    """
+    agent_ids = np.sort(data['agent_id'].unique())
+    n_agents = len(agent_ids)
+    n_trials = data.groupby('agent_id').size().iloc[0]
 
-def perform_cp_decomposition(tensor, rank=3, n_iter_max=5000, random_state=42):
+    tensor = np.zeros((n_agents, n_trials, n_features))
+
+    for i, aid in enumerate(agent_ids):
+        agent_data = data[data['agent_id'] == aid].sort_values(by='trial')  # sort if trial index available
+        if len(agent_data) != n_trials:
+            raise ValueError(f"Agent {aid} has {len(agent_data)} trials, expected {n_trials}.")
+        tensor[i, :, 0] = agent_data['action'].values
+        tensor[i, :, 1] = agent_data['reward'].values
+
+    return tensor, agent_ids
+
+
+def perform_cp_decomposition(tensor, rank=3, n_iter_max=5000, random_state=123):
     """Perform non-negative CP decomposition"""
     try:
         decomp = non_negative_parafac(
@@ -82,7 +87,7 @@ def extract_agent_factors(factors, agent_dim=0):
     """Extract agent factor matrix from CP decomposition"""
     return factors[agent_dim]
 
-def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42):
+def prepare_agent_features_cp(data, rank=3, n_iter_max=5000, random_state=456):
     """Prepare agent features using CP decomposition"""
     print(f"Preparing features for dataset with shape: {data.shape}")
     
@@ -93,7 +98,7 @@ def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42):
     print(f"Creating tensor with shape: ({n_agents}, {n_trials}, 2)")
     
     # Create tensor from data
-    tensor = create_tensor_from_data(data, n_agents, n_trials, n_features=2)
+    tensor, _ = create_tensor_from_data(data, n_features=2)
     
     # Perform CP decomposition
     print(f"Performing CP decomposition with rank {rank}...")
@@ -102,6 +107,17 @@ def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42):
     # L1 normalize factors
     print("L1 normalizing factors...")
     weights, factors = manual_l1_normalize(cp_decomp)
+    #print the first example of the factors
+    print(f"First example of factors: {factors[0][0, :]}")
+    print(f"First example of weights: {weights[0]}")
+    print(f"Shape of factors: {factors[0].shape}")
+    print(f"Shape of weights: {weights.shape}")
+    # len of factors
+    print(f"Length of factors: {len(factors)}")
+    # len of weights
+    print(f"Length of weights: {len(weights)}")
+ 
+   
     
     # Reorder components by weights
     print("Reordering components by weights...")
@@ -122,80 +138,80 @@ def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42):
     
     return agent_factors, np.array(phenotypes), sorted_weights, sorted_factors
 
-def prepare_agent_features_pca(data, n_components=3, random_state=42):
-    """Prepare agent features using PCA instead of CP decomposition"""
-    print(f"Preparing features using PCA for dataset with shape: {data.shape}")
-    
-    # Get unique agents and trials
-    n_agents = data['agent_id'].nunique()
-    n_trials = data.groupby('agent_id').size().iloc[0]
-    
-    print(f"Creating tensor with shape: ({n_agents}, {n_trials}, 2)")
-    
-    # Create tensor from data
-    tensor = create_tensor_from_data(data, n_agents, n_trials, n_features=2)
-    
-    # Reshape tensor to 2D for PCA: (n_agents, n_trials * n_features)
-    tensor_2d = tensor.reshape(n_agents, -1)
-    print(f"Reshaped tensor shape: {tensor_2d.shape}")
-    
-    # Apply PCA
-    from sklearn.decomposition import PCA
-    pca = PCA(n_components=n_components, random_state=random_state)
-    features = pca.fit_transform(tensor_2d)
-    
-    # Get phenotypes for each agent
-    phenotypes = []
-    for agent_id in range(n_agents):
-        agent_phenotype = data[data['agent_id'] == agent_id]['phenotype'].iloc[0]
-        phenotypes.append(agent_phenotype)
-    
-    print(f"PCA features shape: {features.shape}")
-    print(f"Explained variance ratio: {pca.explained_variance_ratio_}")
-    print(f"Cumulative explained variance: {np.cumsum(pca.explained_variance_ratio_)}")
-    print(f"Number of phenotypes: {len(set(phenotypes))}")
-    
-    return features, np.array(phenotypes), pca
-
-def project_test_data_onto_train_space(test_tensor, B_train, C_train, weights_train):
-    """Project test data onto the latent space defined by B_train and C_train"""
-    print("Projecting test data onto training latent space...")
-    
-    # 1. Compute the Khatri-Rao product of C_train and B_train
-    # This creates the combined basis matrix Z = C_train ⊙ B_train
-    # Shape: (n_trials * n_features, rank)
-    Z = tl.tenalg.khatri_rao([C_train, B_train])
-    
-    # 2. Unfold the test tensor along the agent mode (mode 0)
-    # Shape: (n_test_agents, n_trials * n_features)
-    X_test_unfolded = tl.unfold(test_tensor, mode=0)
-    
-    # 3. Solve the non-negative least squares problem for each test agent
-    n_test_agents = test_tensor.shape[0]
+def project_test_data_onto_train_space(test_tensor, B_train, C_train, weights_train, A_test):
+    """
+    Project test data onto the training space using Khatri-Rao product and NNLS
+    """
+    n_agents, n_trials, n_features = test_tensor.shape
     rank = B_train.shape[1]
-    A_test = np.zeros((n_test_agents, rank))
+    test_tensor_2d = test_tensor.reshape(n_agents, -1)
     
-    print(f"Solving NNLS for {n_test_agents} test agents...")
-    
-    for i in range(n_test_agents):
-        # x_i is the flattened vector for the i-th test agent
-        x_i = X_test_unfolded[i, :]
-        
-        # Solve: min ||x_i - Z @ a_i||^2 subject to a_i >= 0
-        # This finds the best non-negative coefficients a_i in the latent space
-        a_i, _ = nnls(Z, x_i)
-        A_test[i, :] = a_i
-    
-    # 4. Scale by the training weights to maintain consistency
-    # But first, normalize the weights to prevent extreme scaling
-    weights_normalized = weights_train / np.max(np.abs(weights_train))
-    A_test_scaled = A_test * weights_normalized
-    
-    print(f"Projection completed. A_test shape: {A_test_scaled.shape}")
-    print(f"Weights used for scaling: {weights_normalized}")
-    return A_test_scaled
+    # Khatri-Rao: (n_trials * n_features, rank)
+    kr_product = np.zeros((n_trials * n_features, rank))
+    for r in range(rank):
+        kr_product[:, r] = np.kron(B_train[:, r], C_train[:, r])
 
-def train_random_forest(X_train, y_train, random_state=42):
+    
+    # Fold weights so NNLS returns a_i (not λ a_i)
+    kr_weighted = kr_product * weights_train[np.newaxis, :]
+
+    from scipy.optimize import nnls
+    projected_A = np.zeros((n_agents, rank))
+    for i in range(n_agents):
+        coeff, _ = nnls(kr_weighted, test_tensor_2d[i, :])
+        projected_A[i, :] = coeff
+
+    print(f"Khatri-Rao product shape: {kr_product.shape}")
+    print(f"Projected A_test shape: {projected_A.shape}")
+    return projected_A
+
+def validate_projection(test_tensor, B_train, C_train, weights_train, A_test_projected):
+    """
+    Comprehensive validation of the projection results.
+    Checks reconstruction error, numerical properties, and sanity tests.
+    """
+    
+    # 1. Reconstruct test tensor using projected factors
+    n_agents, n_trials, n_features = test_tensor.shape
+    rank = A_test_projected.shape[1]
+    
+    # Reconstruct: A_test_projected @ (B_train ⊙ C_train)^T
+    reconstructed = np.zeros_like(test_tensor)
+
+    # Create Khatri-Rao product for reconstruction
+    kr_product = np.zeros((n_trials * n_features, rank))
+    for r in range(rank):
+        kr_product[:, r] = np.kron(B_train[:, r], C_train[:, r])
+
+    # Reconstruct using the projected A factors and Khatri-Rao product
+    for i in range(n_agents):
+        # A_test_projected[i, :] @ kr_product.T gives us the flattened reconstruction
+        flattened = A_test_projected[i, :] @ kr_product.T
+        reconstructed[i, :, :] = flattened.reshape(n_trials, n_features)
+
+    # 2. Calculate reconstruction error
+    mse = np.mean((test_tensor - reconstructed) ** 2)
+    mae = np.mean(np.abs(test_tensor - reconstructed))
+    
+    print(f"Reconstruction Error:")
+    print(f"  MSE: {mse:.6f}")
+    print(f"  MAE: {mae:.6f}")
+    
+    # 3. Check numerical properties
+    print(f"\nNumerical Properties:")
+    print(f"  A_test_projected range: [{np.min(A_test_projected):.6f}, {np.max(A_test_projected):.6f}]")
+    print(f"  A_test_projected mean: {np.mean(A_test_projected):.6f}")
+    print(f"  A_test_projected std: {np.std(A_test_projected):.6f}")
+    
+    # 4. Sanity checks
+    print(f"\nSanity Checks:")
+    print(f"  All A_test_projected >= 0: {np.all(A_test_projected >= 0)}")
+    print(f"  A_test_projected shape: {A_test_projected.shape}")
+    print(f"  Test tensor shape: {test_tensor.shape}")
+    
+    return reconstructed, mse, mae
+
+def train_random_forest(X_train, y_train, random_state=789):
     """Train Random Forest classifier"""
     le = LabelEncoder()
     y_train_encoded = le.fit_transform(y_train)
@@ -209,6 +225,7 @@ def train_random_forest(X_train, y_train, random_state=42):
         n_jobs=-1
     )
     
+    print(f"Training Random Forest classifier with {X_train.shape[0]} samples and {X_train.shape[1]} features")
     rf.fit(X_train, y_train_encoded)
     
     return rf, le
@@ -254,12 +271,11 @@ def plot_confusion_matrix(y_test, y_pred, le, accuracy):
     # Create heatmap
     im = ax.imshow(cm_reordered, cmap='Blues', aspect='auto')
     
-    # Add count annotations to each cell
+    # Add annotations
     for i in range(len(reordered_labels)):
         for j in range(len(reordered_labels)):
             ax.text(j, i, str(cm_reordered[i, j]),
-                          ha="center", va="center", 
-                          color="black", fontsize=12)
+                   ha="center", va="center", color="black", fontsize=12)
     
     # Set labels
     ax.set_xticks(range(len(reordered_labels)))
@@ -287,67 +303,98 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Projection-based classification with CP decomposition")
-    parser.add_argument("--rank", type=int, default=3, help="CP decomposition rank (default: 3)")
-    parser.add_argument("--rf-seed", type=int, default=42, help="Random Forest seed (default: 42)")
+    parser.add_argument("--rank", type=int, default=3, 
+                       help="CP decomposition rank (default: 3)")
+    parser.add_argument("--rf-seed", type=int, default=789, 
+                       help="Random Forest seed (default: 789)")
     
     args = parser.parse_args()
     
     print("=" * 60)
     print("PROJECTION-BASED CLASSIFICATION WITH CP DECOMPOSITION")
     print("=" * 60)
+    print("Uses CP decomposition, Khatri-Rao product, and NNLS projection")
     
     try:
-        # Load datasets
+        # Load separate train and test datasets
         print("Loading datasets...")
         train_data, test_data = load_train_test_datasets()
         
-        # Prepare training features using PCA
-        print(f"\n1. Preparing training features with {args.rank} components...")
-        X_train, y_train, pca_train = prepare_agent_features_pca(
-            train_data, n_components=args.rank, random_state=args.rf_seed
+        # 1. Prepare training features with CP decomposition
+        print(f"\n1. Preparing training features with rank {args.rank}...")
+        A_train, y_train, weights_train, factors_train = prepare_agent_features_cp(
+            train_data, args.rank, random_state=args.rf_seed
         )
         
-        print(f"Training features extracted:")
-        print(f"  X_train shape: {X_train.shape}")
-        print(f"  PCA components: {args.rank}")
+        # Extract B and C factors from training
+        B_train = factors_train[1]  # Trial factors
+        C_train = factors_train[2]  # Feature factors
         
-        # Create test tensor
+        print(f"Training factors extracted:")
+        print(f"  A_train shape: {A_train.shape}")
+        print(f"  B_train shape: {B_train.shape}")
+        print(f"  C_train shape: {C_train.shape}")
+        print(f"  Weights: {weights_train}")
+        
+        # 2. Create test tensor
         print(f"\n2. Creating test tensor...")
         n_agents_test = test_data['agent_id'].nunique()
-        n_trials = test_data.groupby('agent_id').size().iloc[0]
-        test_tensor = create_tensor_from_data(test_data, n_agents_test, n_trials, n_features=2)
+        n_trials_test = test_data.groupby('agent_id').size().iloc[0]
+        
+        test_tensor, agent_ids = create_tensor_from_data(test_data, n_features=2)
+        phenotypes = [test_data[test_data['agent_id']==aid]['phenotype'].iloc[0] for aid in agent_ids]
         print(f"Test tensor shape: {test_tensor.shape}")
+        print(f"Number of phenotypes: {len(set(phenotypes))}")
+
         
-        # Project test data using PCA transform
-        print(f"\n3. Projecting test data using PCA...")
-        test_tensor_2d = test_tensor.reshape(n_agents_test, -1)
-        X_test = pca_train.transform(test_tensor_2d)
+        # 3. Project test data using Khatri-Rao product and NNLS
+        print(f"\n3. Projecting test data using Khatri-Rao product and NNLS...")
+        A_test_projected = project_test_data_onto_train_space(
+            test_tensor, B_train, C_train, weights_train, A_train
+        )
         
-        # Get test phenotypes
-        test_phenotypes = []
+        # 4. Validate projection
+        print(f"\n4. Validating projection results...")
+        reconstructed, mse, mae = validate_projection(
+            test_tensor, B_train, C_train, weights_train, A_test_projected
+        )
+        
+        # 5. Get test phenotypes
+        y_test = []
         for agent_id in range(n_agents_test):
             agent_phenotype = test_data[test_data['agent_id'] == agent_id]['phenotype'].iloc[0]
-            test_phenotypes.append(agent_phenotype)
-        y_test = np.array(test_phenotypes)
+            y_test.append(agent_phenotype)
+        y_test = np.array(y_test)
         
-        print(f"Projection completed:")
-        print(f"  X_test shape: {X_test.shape}")
+        print(f"\nTest data prepared:")
+        print(f"  X_test shape: {A_test_projected.shape}")
         print(f"  y_test shape: {y_test.shape}")
         
-        # Train model and evaluate
-        print("\n4. Training Random Forest classifier...")
-        rf, le = train_random_forest(X_train, y_train, random_state=args.rf_seed)
+        # 6. Train model
+        print("\n5. Training Random Forest classifier...")
+        rf, le = train_random_forest(A_train, y_train, random_state=args.rf_seed)
         
-        print("\n5. Evaluating model on projected test data...")
+        # 7. Evaluate model on projected test data
+        print("\n6. Evaluating model on projected test data...")
         y_test_encoded = le.transform(y_test)
-        accuracy, y_pred, y_pred_proba = evaluate_model(rf, le, X_test, y_test_encoded)
+        accuracy, y_pred, y_pred_proba = evaluate_model(rf, le, A_test_projected, y_test_encoded)
         
-        print("\n6. Generating confusion matrix plot...")
+        # 8. Plot results
+        print("\n7. Generating confusion matrix plot...")
         plot_confusion_matrix(y_test_encoded, y_pred, le, accuracy)
         
         print("PROJECTION-BASED CLASSIFICATION COMPLETED SUCCESSFULLY!")
 
-        
+        #print the shape of the test tensor and the train tensor
+        print(f"Test tensor shape: {test_tensor.shape}")
+        print(f"Train tensor shape: {A_train.shape}")
+
+        #print the first example of the test tensor and the train tensor
+        print(f"First example of test tensor: {test_tensor[0, :, :]}")
+        print(f"First example of train tensor: {A_train[0, :]}")
+        print(f"B_train shape: {B_train.shape}")
+        print(f"C_train shape: {C_train.shape}")
+
         return accuracy
         
     except Exception as e:

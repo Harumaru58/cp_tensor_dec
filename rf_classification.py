@@ -7,13 +7,15 @@ from tensorly.decomposition import non_negative_parafac
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import cross_val_score, StratifiedKFold, GridSearchCV
+from sklearn.metrics import make_scorer, accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 def load_train_test_datasets():
     """Load the separate train and test datasets"""
-    train_path = 'datasets/raw_dataset_train_1000.csv'
-    test_path = 'datasets/raw_dataset_test_1000.csv'
+    train_path = 'datasets/enhanced_dataset_train_1000_seed_789.csv'
+    test_path = 'datasets/enhanced_dataset_test_1000_seed_987.csv'
     
     if not os.path.exists(train_path):
         raise FileNotFoundError(f"Train dataset not found at {train_path}")
@@ -27,17 +29,24 @@ def load_train_test_datasets():
     
     return train_data, test_data
 
-def create_tensor_from_data(data, n_agents, n_trials, n_features=2):
+def create_tensor_from_data(data, n_agents, n_trials, n_features=None):
     """Create a 3D tensor from the dataset"""
+    # If n_features is None, use all available behavioral features
+    if n_features is None:
+        # Get all feature columns excluding metadata
+        exclude_cols = ['agent_id', 'trial', 'phenotype']
+        feature_cols = [col for col in data.columns if col not in exclude_cols]
+        n_features = len(feature_cols)
+        print(f"Using {n_features} features: {feature_cols}")
+    
     # Reshape data into tensor: (agents, trials, features)
-    # Features: action (0/1) and reward (0/1)
     tensor = np.zeros((n_agents, n_trials, n_features))
     
     for agent_id in range(n_agents):
         agent_data = data[data['agent_id'] == agent_id]
         if len(agent_data) == n_trials:
-            tensor[agent_id, :, 0] = agent_data['action'].values  # actions
-            tensor[agent_id, :, 1] = agent_data['reward'].values  # rewards
+            for feature_idx, feature_col in enumerate(feature_cols):
+                tensor[agent_id, :, feature_idx] = agent_data[feature_col].values
     
     return tensor
 
@@ -97,7 +106,7 @@ def prepare_agent_features(data, rank=3, n_iter_max=5000, random_state=42, weigh
     print(f"Creating tensor with shape: ({n_agents}, {n_trials}, 2)")
     
     # Create tensor from data
-    tensor = create_tensor_from_data(data, n_agents, n_trials, n_features=2)
+    tensor = create_tensor_from_data(data, n_agents, n_trials, n_features=None)
     
     # Perform CP decomposition
     print(f"Performing CP decomposition with rank {rank}...")
@@ -240,6 +249,62 @@ def plot_confusion_matrix(y_test, y_pred, le, accuracy):
     # Show the plot
     plt.show()
 
+def perform_cross_validation(X, y, cv_folds=5, random_state=42):
+    """Perform k-fold cross-validation on the data"""
+    print(f"\nPerforming {cv_folds}-fold cross-validation...")
+    
+    # Initialize Random Forest
+    rf = RandomForestClassifier(
+        n_estimators=100,
+        max_depth=10,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        random_state=random_state,
+        n_jobs=-1
+    )
+    
+    # Perform cross-validation
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    cv_scores = cross_val_score(rf, X, y, cv=cv, scoring='accuracy', n_jobs=-1)
+    
+    print(f"Cross-validation scores: {cv_scores}")
+    print(f"Mean CV accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+    
+    # Fit the model on all training data for final evaluation
+    rf.fit(X, y)
+    
+    return cv_scores, rf
+
+def tune_hyperparameters(X, y, cv_folds=5, random_state=42):
+    """Tune Random Forest hyperparameters using GridSearchCV"""
+    print(f"\nTuning hyperparameters with {cv_folds}-fold CV...")
+    
+    # Define parameter grid
+    param_grid = {
+        'n_estimators': [50, 100, 200],
+        'max_depth': [5, 10, 15, None],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4]
+    }
+    
+    # Initialize Random Forest
+    rf = RandomForestClassifier(random_state=random_state, n_jobs=-1)
+    
+    # Perform grid search with cross-validation
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    grid_search = GridSearchCV(
+        rf, param_grid, cv=cv, scoring='accuracy', 
+        n_jobs=-1, verbose=1
+    )
+    
+    # Fit the grid search
+    grid_search.fit(X, y)
+    
+    print(f"Best parameters: {grid_search.best_params_}")
+    print(f"Best CV score: {grid_search.best_score_:.4f}")
+    
+    return grid_search.best_estimator_, grid_search.best_score_
+
 def main():
     """Main function"""
     import argparse
@@ -247,6 +312,12 @@ def main():
     parser = argparse.ArgumentParser(description="Raw dataset classification")
     parser.add_argument("--rank", type=int, default=3, help="CP decomposition rank (default: 3)")
     parser.add_argument("--rf-seed", type=int, default=42, help="Random Forest seed (default: 42)")
+    parser.add_argument("--cross-validate", action="store_true",
+                       help="Perform cross-validation on training data")
+    parser.add_argument("--cv-folds", type=int, default=5,
+                       help="Number of CV folds (default: 5)")
+    parser.add_argument("--tune-hyperparams", action="store_true",
+                       help="Tune hyperparameters using GridSearchCV")
     
     args = parser.parse_args()
     
@@ -268,14 +339,44 @@ def main():
         #weights = np.array([1,1,1])
         #X_test, y_test = prepare_agent_features(test_data, rank=args.rank, random_state=args.rf_seed, weights_explicit=weights)
         X_test, y_test = prepare_agent_features(test_data, rank=args.rank, random_state=args.rf_seed)
-        # Train model
-        print("\nTraining Random Forest classifier...")
-        rf, le = train_random_forest(X_train, y_train, random_state=args.rf_seed)
         
-        # Ensure test labels are encoded with the same encoder
-        #print(f"Test labels: {y_test}")
-        y_test_encoded = le.transform(y_test)
-        #print(f"Test labels encoded: {le.transform(y_test)}")
+        # Perform cross-validation if requested
+        if args.cross_validate:
+            print("\n=== CROSS-VALIDATION PHASE ===")
+            
+            # Perform cross-validation on training data
+            cv_scores, rf_cv = perform_cross_validation(
+                X_train, y_train, args.cv_folds, args.rf_seed
+            )
+            
+            # Tune hyperparameters if requested
+            if args.tune_hyperparams:
+                best_rf, best_cv_score = tune_hyperparameters(
+                    X_train, y_train, args.cv_folds, args.rf_seed
+                )
+                rf = best_rf  # Use tuned model for final evaluation
+                print(f"\nUsing tuned model with CV score: {best_cv_score:.4f}")
+            else:
+                rf = rf_cv  # Use CV-validated model
+                print(f"\nUsing CV-validated model")
+            
+            # Need to create label encoder for cross-validation case
+            le = LabelEncoder()
+            y_train_encoded = le.fit_transform(y_train)
+            # Also encode test labels
+            y_test_encoded = le.transform(y_test)
+            # Train the model on encoded labels
+            rf.fit(X_train, y_train_encoded)
+        else:
+            # Train model normally
+            print("\nTraining Random Forest classifier...")
+            rf, le = train_random_forest(X_train, y_train, random_state=args.rf_seed)
+        
+        # Ensure test labels are encoded with the same encoder (only if not using CV)
+        if not args.cross_validate:
+            #print(f"Test labels: {y_test}")
+            y_test_encoded = le.transform(y_test)
+            #print(f"Test labels encoded: {le.transform(y_test)}")
         
         # Evaluate model
         print("\nEvaluating model...")

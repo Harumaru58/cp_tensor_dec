@@ -28,16 +28,13 @@ class QLearningAgent:
         self.successful_pulls = np.zeros(n_actions)
         self.trial_count = 0
         
-        # Advanced behavioral metrics
+        # Advanced behavioral metrics 
         self.action_switches = 0
         self.reward_streak = 0
         self.loss_streak = 0
-        self.max_reward_streak = 0
-        self.max_loss_streak = 0
         self.early_performance = 0  # First 10 trials
         self.mid_performance = 0    # Trials 10-50
         self.late_performance = 0   # Last 10 trials
-        self.performance_trend = 0
         self.exploration_rate = 0
         self.exploitation_rate = 0
 
@@ -73,15 +70,13 @@ class QLearningAgent:
             self.action_switches += 1
         self.last_action = action
         
-        # Track reward streaks
+        # Track current reward streaks 
         if reward == 1:
             self.reward_streak += 1
             self.loss_streak = 0
-            self.max_reward_streak = max(self.max_reward_streak, self.reward_streak)
         else:
             self.loss_streak += 1
             self.reward_streak = 0
-            self.max_loss_streak = max(self.max_loss_streak, self.loss_streak)
         
         # Update performance phases
         if self.trial_count == 10:
@@ -130,14 +125,10 @@ class QLearningAgent:
         
         # Streak metrics
         reward_streak_ratio = self.reward_streak / max(1, self.trial_count)
-        max_reward_streak_ratio = self.max_reward_streak / max(1, self.trial_count)
-        max_loss_streak_ratio = self.max_loss_streak / max(1, self.trial_count)
         
         # Performance phases
         early_perf = self.early_performance if self.trial_count >= 10 else 0
         mid_perf = self.mid_performance if self.trial_count >= 50 else 0
-        late_perf = self.late_performance if self.trial_count >= 140 else 0
-        perf_trend = self.performance_trend if self.trial_count >= 140 else 0
         
         # Exploration metrics
         exploration_rate = self.exploration_rate if self.trial_count >= 20 else 0
@@ -159,9 +150,12 @@ class QLearningAgent:
                 action_reward_corr = 0
             
             # Learning curve analysis
-            first_third = np.mean(recent_rewards[:10]) if len(recent_rewards) >= 10 else 0
-            last_third = np.mean(recent_rewards[-10:]) if len(recent_rewards) >= 10 else 0
-            learning_improvement = last_third - first_third
+            if len(recent_rewards) >= 20:
+                first_half = np.mean(recent_rewards[:len(recent_rewards)//2])
+                second_half = np.mean(recent_rewards[len(recent_rewards)//2:])
+                learning_improvement = second_half - first_half
+            else:
+                learning_improvement = 0
         else:
             reward_volatility = 0
             action_reward_corr = 0
@@ -182,14 +176,10 @@ class QLearningAgent:
             
             # Streak analysis
             'reward_streak_ratio': reward_streak_ratio,
-            'max_reward_streak_ratio': max_reward_streak_ratio,
-            'max_loss_streak_ratio': max_loss_streak_ratio,
             
             # Performance phases
             'early_performance': early_perf,
             'mid_performance': mid_perf,
-            'late_performance': late_perf,
-            'performance_trend': perf_trend,
             
             # Exploration metrics
             'exploration_rate': exploration_rate,
@@ -200,9 +190,8 @@ class QLearningAgent:
             'action_reward_correlation': action_reward_corr,
             'learning_improvement': learning_improvement,
             
-            # Summary stats
-            'total_rewards': self.total_rewards,
-            'trial_count': self.trial_count
+            # Current trial info (no leakage)
+            'current_trial': self.trial_count
         }
 
     def reset(self):
@@ -220,12 +209,8 @@ class QLearningAgent:
         self.action_switches = 0
         self.reward_streak = 0
         self.loss_streak = 0
-        self.max_reward_streak = 0
-        self.max_loss_streak = 0
         self.early_performance = 0
         self.mid_performance = 0
-        self.late_performance = 0
-        self.performance_trend = 0
         self.exploration_rate = 0
         self.exploitation_rate = 0
 
